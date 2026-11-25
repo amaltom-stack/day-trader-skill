@@ -14,7 +14,7 @@ rest of the session 10,000 times from the stock's own recent bars, plus every
 past day the same setup fired, and tells you the honest odds.
 
 And no trade goes through until you say yes. Nothing in this pack can place
-an order on its own. Paper trading is the default.
+an order on its own. Demo (practice money) trading is the default.
 
 > **Looking for the original Trader skill?** Copy an investor's 13F, the
 > stock screener, tax lots and rebalancing live in
@@ -68,7 +68,7 @@ or in the `SEC_USER_AGENT` environment variable.
 | `/trader-timemachine` | Time Machine | Replays every possible outcome of a trade before you risk a dollar: 10,000 simulated sessions plus every past time the setup fired. |
 | `/trader-risk` | Risk Manager | Checks every trade against your limits and stops anything over them. |
 | `/trader-budget` | Budget Manager | Sizes every position to your budget and your max loss per trade. |
-| `/trader-broker` | Order Executor | Sends approved orders to your broker, paper trading by default, never without your yes. |
+| `/trader-broker` | Order Executor | Sends approved orders to Trading 212, demo (practice money) account by default, never without your yes. |
 | `/trader-alerts` | Price Alerts | Rings when a price, a stop or the opening bell hits. |
 | `/trader-analyst` | Earnings Analyst | Reads earnings reports and sums up what changed. |
 | `/trader-pelosi` | Pelosi Tracker | Reads Congress's stock-trade disclosures the minute they are filed. |
@@ -114,9 +114,9 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
    loss limit, trades per day, reward to risk, the entry window, position
    size and cash. PASS or BLOCK, with the reason.
 8. **`/trader-broker`** shows you the ticket in plain words. You type yes for
-   that exact order. Claude calls your brokerage connector (Alpaca's MCP
-   server, paper account by default), and Claude's own "Allow once / Deny"
-   card asks you one more time.
+   that exact order. Claude runs `t212.py place`, which sends it to
+   Trading 212's API (the demo account by default), and Claude's own "Allow
+   once / Deny" card asks you one more time.
 9. **`/trader-alerts`** rings on the stop, the target and at 3:55 PM to
    flatten whatever is still open.
 
@@ -161,14 +161,18 @@ yourself, and talk to a licensed professional if you need advice.
 
 **No trade goes through until you say yes.** Only `/trader-broker` can lead to
 an order, and only after `/trader-risk` passes that exact order and you type
-yes for it in the chat. Set your brokerage tool to "Needs approval" in Claude
-(Customize, Connectors, tool permissions), never "Always allow", so Claude's
-own "Allow once / Deny" card is a second check. No options, margin, short
+yes for it in the chat. Keep the order commands on "ask" in Claude Code
+(`.claude/settings.json`, see `trader-broker/claude_settings.example.json`),
+never "allow", so Claude's own "Allow once / Deny" card is a second check. No options, margin, short
 selling or leverage unless you turn them on.
 
-**Paper first.** `"paper": true` is the default in `config.example.json`, and
-Alpaca's MCP server defaults to its paper account. Keys live in environment
-variables, never in the chat.
+**Demo first.** `"paper": true` is the default in `config.example.json`, and
+it means the Trading 212 demo (practice money) account. Live needs both
+`"paper": false` and `T212_ENV=live`, set by you. Your Trading 212 API key and
+secret live in environment variables on your own computer (`T212_API_KEY`,
+`T212_API_SECRET`), never in the chat. Sending an order needs Claude Code on
+your computer; Trading 212's API takes only market orders on a live account,
+so a stop-loss can sit at the broker on demo only (see `/trader-broker`).
 
 **The Time Machine is a simulation, not a prediction.** It is built from the
 stock's own last 60 days of 5-minute bars. The future can do things those 60
@@ -206,7 +210,7 @@ trader-exit/        SKILL.md, exit.py
 trader-timemachine/ SKILL.md, timemachine.py
 trader-risk/        SKILL.md, check.py
 trader-budget/      SKILL.md, size.py, config.example.json, targets.example.json
-trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
+trader-broker/      SKILL.md, ticket.py, t212.py, claude_settings.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json
 trader-pelosi/      SKILL.md, ptr.py

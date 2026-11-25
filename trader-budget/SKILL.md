@@ -6,7 +6,7 @@ description: >-
   the whole shares that fit inside four limits (max loss per trade, position
   cap, max order, cash after your buffer), says which limit decided it, and
   writes ONE bracket order (entry, stop-loss, take-profit) to
-  trader/orders.json in the exact shape of Alpaca's place_stock_order. A stop
+  trader/orders.json in the order shape trader-broker sends to Trading 212. A stop
   too far away for your max loss is a plain refusal, not a smaller order.
   Nothing is placed. Use when the user says "how many shares", "size this
   trade", "how much should I buy", "I have $5,000", "I only want to risk $50
@@ -69,7 +69,7 @@ If `trader/config.json` does not exist, copy `config.example.json` into
 python3 "${CLAUDE_SKILL_DIR}/size.py" --write
 ```
 
-Whole shares only: Alpaca takes no fractions in a bracket order. The size is
+Whole shares only in a bracket order, so its stop-loss covers every share. The size is
 the smallest of four limits:
 
 | limit | shares |
@@ -121,7 +121,7 @@ share. The example config: $5,000 budget, 10% cash buffer, $50 max loss.
 ```
 
 `why` and `plan` are notes for trader-risk and trader-broker. They are never
-sent to Alpaca. With the stop at 300.00 instead, one share would risk 64.18,
+sent to the broker. With the stop at 300.00 instead, one share would risk 64.18,
 more than the $50 max loss: no order. At 10:52 the real quote was 366.48, so
 the same plan sizes to 6 shares at 8.16 a share, and reward:risk falls to
 0.44: refused, because the move it was waiting for has mostly happened.
@@ -157,10 +157,10 @@ margin or short positions.
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
+- Demo (practice money) trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
 - Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
   passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
+  user clicked Allow once on Claude's own card because the order command is on "ask"
+  (`.claude/settings.json` permissions). Never put an order command in "allow".
 - No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+- Broker keys live in environment variables on the user's own computer, never in the chat.

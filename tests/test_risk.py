@@ -112,7 +112,7 @@ class TheReel(unittest.TestCase):
         self.assertEqual(check.fingerprint(dict(o, why="anything", plan={})), check.fingerprint(o))
         self.assertNotEqual(check.fingerprint(dict(o, qty="9")), check.fingerprint(o))
         self.assertNotEqual(check.fingerprint(dict(o, stop_loss_stop_price="358.00")), check.fingerprint(o))
-        self.assertEqual(check.ALPACA_FIELDS, ticket.ALPACA_FIELDS)
+        self.assertEqual(check.ORDER_FIELDS, ticket.ORDER_FIELDS)
 
     def test_cli(self):
         with tempfile.TemporaryDirectory() as d:

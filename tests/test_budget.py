@@ -23,7 +23,7 @@ CONTRACT_CFG = {
     "max_loss_per_trade_usd": 50, "max_daily_loss_usd": 150, "max_trades_per_day": 3, "max_orders_per_day": 10,
     "min_reward_risk": 1.0, "require_stop": True,
     "no_entries_before": "09:45", "no_entries_after": "15:30", "flat_by": "15:55",
-    "fractional": False, "broker": "alpaca", "paper": True, "blocked": [],
+    "fractional": False, "broker": "trading212", "paper": True, "blocked": [],
     "allow_options": False, "allow_margin": False, "allow_short": False, "pdt_guard": False,
     "sec_user_agent": "Your Name you@example.com",
 }
@@ -276,7 +276,7 @@ class WeightsMode(unittest.TestCase):
         for t, v in dollars(r).items():
             self.assertLessEqual(abs(v - REEL_V1[t]), 1.0, t)
 
-    def test_orders_are_place_stock_order_shaped(self):
+    def test_orders_are_in_the_order_file_shape(self):
         r = size.size(rows(TOP5), v1())
         orders = size.orders_from(r, "a 13F")
         self.assertEqual(orders[0], {"symbol": "AAPL", "side": "buy", "notional": "1250", "type": "market",
