@@ -81,8 +81,9 @@ close, so "flat by close" at 15:55 rings at 12:55 on those days.
   and for checking a size, not for timing an order. The broker's price is the
   one that fills. Each price in `trader/prices.json` keeps its quote time, and
   trader-risk only uses one under 15 minutes old.
-- If both are down, read the price from the broker connector (Alpaca
-  `get_stock_snapshot`, IBKR `get_price_snapshot`) and write it into
+- If both are down, read the price from the broker (Trading 212:
+  `currentPrice` in trader-broker's `t212.py positions` for a stock you hold;
+  IBKR `get_price_snapshot`) and write it into
   `trader/prices.json` as `{"as_of": "...Z", "prices": {"TSLA": 366.48}}`.
 
 ## The NYSE clock
@@ -151,10 +152,10 @@ live, and never predicts where a price is going.
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
+- Demo (practice money) trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
 - Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
   passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
+  user clicked Allow once on Claude's own card because the order command is on "ask"
+  (`.claude/settings.json` permissions). Never put an order command in "allow".
 - No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+- Broker keys live in environment variables on the user's own computer, never in the chat.

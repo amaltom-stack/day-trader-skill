@@ -4,7 +4,7 @@
 Default mode: sizes ONE day trade from trader/plan.json (written by
 trader-exit) to your budget and your max loss per trade, then writes one
 bracket order (entry, stop-loss, take-profit) to trader/orders.json in the
-shape of Alpaca's place_stock_order. It never places anything: trader-risk
+broker-neutral order shape trader-broker turns into a Trading 212 request. It never places anything: trader-risk
 checks the order and trader-broker asks you yes or no.
 
     python3 size.py                                  # trader/plan.json + trader/config.json
@@ -13,7 +13,7 @@ checks the order and trader-broker asks you yes or no.
     python3 size.py --limit 364.00 --write           # a limit order at 364.00
     python3 size.py --now "2026-10-19 10:15" --json  # pin the clock (New York time)
 
-How many shares. Whole shares only: Alpaca takes no fractions in a bracket.
+How many shares. Whole shares only in a bracket, so the stop-loss covers every share.
 
     shares = floor of the smallest of
       max loss       max_loss_per_trade_usd / risk per share (entry minus stop)
@@ -75,7 +75,7 @@ DEFAULTS = {
     "no_entries_after": "15:30",
     "flat_by": "15:55",
     "fractional": False,
-    "broker": "alpaca",
+    "broker": "trading212",
     "paper": True,
     "blocked": [],
     "allow_options": False,
@@ -281,12 +281,12 @@ def shares_for(usd, per_share):
 
 
 def _price(x):
-    """358.32 -> "358.32": Alpaca wants prices as strings."""
+    """358.32 -> "358.32": order files keep prices as strings."""
     return "%.2f" % round_cent(x)
 
 
 def _num(x):
-    """1250 -> "1250", 1118.13 -> "1118.13" (Alpaca wants these as strings)."""
+    """1250 -> "1250", 1118.13 -> "1118.13" (order files keep these as strings)."""
     x = round(float(x), 2)
     if abs(x - round(x)) < 0.005:
         return str(int(round(x)))
@@ -416,7 +416,7 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
 
 
 def bracket_order(s):
-    """The one proposed order, Alpaca place_stock_order fields (strings) plus why and plan."""
+    """The one proposed order, order fields (strings) plus why and plan."""
     if s["refusal"] or s["qty"] <= 0:
         return None
     o = {"symbol": s["symbol"], "side": "buy", "qty": str(int(s["qty"])), "type": s["order_type"],
@@ -471,7 +471,7 @@ def plan_report(s, order, notes=()):
                     _price(s["risk_per_share"]), money(s["max_loss"])))
     lines.append("A stop is an order, not a promise: in a fast market it can fill below %s." % _price(s["stop"]))
     lines.append("")
-    lines.append("Proposed bracket order (place_stock_order arguments, nothing has been placed):")
+    lines.append("Proposed bracket order (order fields, nothing has been placed):")
     how = "limit %s" % order["limit_price"] if order["type"] == "limit" else "market"
     lines.append("  buy %s %s, %s, day, take-profit %s, stop-loss %s"
                  % (order["qty"], order["symbol"], how, order["take_profit_limit_price"],
@@ -682,7 +682,7 @@ def size(rows, cfg, budget=None, prices=None, whole=None, cents=False, top=None)
 
 
 def orders_from(result, source=""):
-    """Weights mode: proposed buy orders, one per position, in place_stock_order shape."""
+    """Weights mode: proposed buy orders, one per position, in the order-file shape."""
     out = []
     for p in result["positions"]:
         if p["dollars"] <= 0:
@@ -735,7 +735,7 @@ def report(result, orders, source=""):
     for d in r["dropped"]:
         lines.append("Dropped %s: %s" % (d["ticker"], d["reason"]))
     lines.append("")
-    lines.append("Proposed orders (place_stock_order arguments, nothing has been placed):")
+    lines.append("Proposed orders (order fields, nothing has been placed):")
     for o in orders:
         amount = ("notional \"%s\"" % o["notional"]) if "notional" in o else ("qty \"%s\"" % o["qty"])
         lines.append("  %s %s %s, %s, %s" % (o["side"], o["symbol"], amount, o["type"], o["time_in_force"]))

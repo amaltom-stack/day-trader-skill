@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "ask": [
+      "Bash(python3 *t212.py place*)",
+      "Bash(python3 *t212.py protect*)",
+      "Bash(python3 *t212.py cancel*)"
+    ]
+  }
+}

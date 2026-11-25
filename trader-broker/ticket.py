@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Order tickets and the decision log for trader-broker. Standard library only.
 
-This tool never talks to a broker and never places anything. It does its
-work around the one moment that matters, your yes:
+This tool never talks to a broker and never places anything (t212.py, next
+to it, is the only file that sends anything, and only for an order you said
+yes to here). It does its work around the one moment that matters, your yes:
 
   show      renders each proposed order as a plain-English ticket plus the
-            exact JSON Claude will send to Alpaca's place_stock_order tool.
+            exact request t212.py will send to Trading 212's API (demo by
+            default).
             A bracket order shows its stop-loss, take-profit and the max loss
             at the stop. An order is READY only if trader-risk passed THIS
             exact order today (matched by fingerprint) and nobody has decided
@@ -16,6 +18,7 @@ work around the one moment that matters, your yes:
   decline   records a no.
   result    records what happened after the Allow once / Deny card:
             placed (with the broker's order id), denied, or failed.
+            (t212.py place records this by itself.)
   fill      records a fill in trader/portfolio.json (cash and shares).
   flatten   builds a sell ticket that closes a symbol's open position by
             flat_by. It still goes through trader-risk and your yes.
@@ -41,7 +44,7 @@ import os
 import re
 import sys
 
-ALPACA_FIELDS = ("symbol", "side", "qty", "notional", "type", "time_in_force", "limit_price",
+ORDER_FIELDS = ("symbol", "side", "qty", "notional", "type", "time_in_force", "limit_price",
                  "stop_price", "trail_price", "trail_percent", "extended_hours", "client_order_id",
                  "order_class", "take_profit_limit_price", "stop_loss_stop_price",
                  "stop_loss_limit_price", "advanced_instructions")
@@ -50,6 +53,9 @@ STRING_FIELDS = ("qty", "notional", "limit_price", "stop_price", "trail_price", 
 TIF_WORDS = {"day": "good for today", "gtc": "good until canceled", "opg": "at the open",
              "cls": "at the close", "ioc": "immediate or cancel", "fok": "fill or kill"}
 YES_WORDS = ("yes", "y")
+BROKER_NAMES = {"trading212": "Trading 212", "ibkr": "Interactive Brokers"}
+T212_HOSTS = {"demo": "demo.trading212.com", "live": "live.trading212.com"}
+T212_TIF = {"day": "DAY", "gtc": "GOOD_TILL_CANCEL"}
 BATCH_WORDS = {"all", "every", "everything", "rest", "remaining", "them", "both", "batch", "each"}
 DOUBT_WORDS = {"no", "not", "dont", "don't", "wait", "cancel", "stop", "but", "maybe", "later",
                "hold", "unless", "if"}
@@ -144,7 +150,7 @@ def rec_day(rec):
 
 def fingerprint(order):
     """Same function as trader-risk/check.py: identifies the exact order."""
-    core = {k: order[k] for k in ALPACA_FIELDS if k in order and order[k] is not None}
+    core = {k: order[k] for k in ORDER_FIELDS if k in order and order[k] is not None}
     blob = json.dumps(core, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -166,11 +172,11 @@ def _f(x):
 
 
 def tool_input(order):
-    """The exact arguments for place_stock_order: Alpaca's parameter names,
-    numbers as strings (its signature types qty, notional and prices as str).
-    "why" and "plan" are ours and are never sent."""
+    """The order's own fields (the names trader-budget writes, numbers as
+    strings), without "why" and "plan", which are ours and are never sent.
+    t212_plan turns these into the Trading 212 request."""
     out = {}
-    for k in ALPACA_FIELDS:
+    for k in ORDER_FIELDS:
         if k in order and order[k] is not None:
             out[k] = _str_num(order[k]) if k in STRING_FIELDS else order[k]
     return out
@@ -297,6 +303,132 @@ def parse_yes(reply, order, batch_symbols=()):
     return True, "explicit yes for %s" % plain(order)
 
 
+# ---------------------------------------------------------------- Trading 212
+
+def broker_of(cfg):
+    """"trading212" (the default) or "ibkr"."""
+    b = re.sub(r"[\s_\-]", "", str((cfg or {}).get("broker") or "trading212").lower())
+    if b in ("trading212", "t212"):
+        return "trading212"
+    if b in ("ibkr", "interactivebrokers"):
+        return "ibkr"
+    raise TicketError("broker %r is not supported here: set \"broker\": \"trading212\" (or \"ibkr\") "
+                      "in trader/config.json" % (cfg or {}).get("broker"))
+
+
+def t212_env(cfg):
+    """demo unless the config says "paper": false."""
+    return "demo" if (cfg or {}).get("paper", True) else "live"
+
+
+def t212_ticker(symbol, cfg=None):
+    """TSLA -> TSLA_US_EQ, Trading 212's ticker for a US stock. A symbol in
+    "t212_tickers" in the config wins (check one with t212.py instrument)."""
+    sym = str(symbol or "").strip().upper()
+    override = ((cfg or {}).get("t212_tickers") or {}).get(sym)
+    if override:
+        return str(override)
+    return "%s_US_EQ" % sym.replace(".", "_").replace("-", "_")
+
+
+def _num(v):
+    """8.0 -> 8, 358.32 -> 358.32: Trading 212 takes numbers, not strings."""
+    f = float(v)
+    return int(f) if f == int(f) else f
+
+
+def t212_plan(order, cfg=None):
+    """The Trading 212 requests for one order: (steps, problems, notes).
+
+    steps     [{"step", "method", "path", "body", "when"}], the entry first.
+              A bracket on demo adds a stop-loss step, sent by t212.py protect
+              after the entry fills.
+    problems  reasons this order cannot go to Trading 212 as it is (the ticket
+              is NOT READY while there are any).
+    notes     what works differently from a bracket at the broker.
+
+    What Trading 212's public API (v0, beta) takes, checked against
+    docs.trading212.com on 2026-11-25: market, limit, stop and stop-limit
+    orders by number of shares (negative for a sell), in the account's main
+    currency; on a LIVE account only market orders; no bracket, one-cancels-
+    other or take-profit orders; no orders by value; extended hours only on a
+    market order."""
+    cfg = cfg or {}
+    env = t212_env(cfg)
+    steps, problems, notes = [], [], []
+    ticker = t212_ticker(order.get("symbol"), cfg)
+    side = str(order.get("side", "")).lower()
+    typ = str(order.get("type", "market")).lower()
+    tif = str(order.get("time_in_force", "day")).lower()
+    q = _f(order.get("qty"))
+    if order.get("notional") is not None:
+        problems.append("Trading 212's API orders by number of shares, not by amount: give a qty instead "
+                        "of %s" % _money(order["notional"]))
+    elif not q or q <= 0:
+        problems.append("Trading 212 needs a positive number of shares (qty)")
+        q = None
+    if side not in ("buy", "sell"):
+        problems.append("side must be buy or sell")
+    signed = _num(q if side == "buy" else -q) if q else None
+    if order.get("extended_hours"):
+        problems.append("this pack trades the regular session only; extended_hours is not sent to Trading 212")
+    if typ == "market":
+        if tif != "day":
+            problems.append("a Trading 212 market order has no time in force; use time_in_force day")
+        steps.append({"step": "entry" if side == "buy" else "order", "method": "POST",
+                      "path": "/api/v0/equity/orders/market",
+                      "body": {"ticker": ticker, "quantity": signed, "extendedHours": False}})
+    elif typ in ("limit", "stop", "stop_limit"):
+        if env == "live":
+            problems.append("Trading 212's API takes only market orders on a live account; a %s order "
+                            "works on the demo account only" % typ.replace("_", "-"))
+        tv = T212_TIF.get(tif)
+        if not tv:
+            problems.append("Trading 212 takes time_in_force day or gtc for a %s order, not %s"
+                            % (typ.replace("_", "-"), tif))
+        body = {"ticker": ticker, "quantity": signed}
+        if typ in ("stop", "stop_limit") and order.get("stop_price") is not None:
+            body["stopPrice"] = _num(order["stop_price"])
+        if typ in ("limit", "stop_limit") and order.get("limit_price") is not None:
+            body["limitPrice"] = _num(order["limit_price"])
+        body["timeValidity"] = tv or tif.upper()
+        steps.append({"step": "entry" if side == "buy" else "order", "method": "POST",
+                      "path": "/api/v0/equity/orders/" + typ, "body": body})
+    else:
+        problems.append("Trading 212 has no %s order" % typ.replace("_", " "))
+    if is_bracket(order):
+        stop = order.get("stop_loss_stop_price")
+        if stop is not None and q:
+            if env == "live":
+                if cfg.get("allow_stop_by_alert"):
+                    notes.append("LIVE account: Trading 212 takes no stop orders there, so the stop-loss %s is "
+                                 "NOT at the broker. trader-alerts watches it; at the stop you close with "
+                                 "flatten and a new yes, and a fast market can go far past it." % _p(stop))
+                else:
+                    problems.append("Trading 212's API takes no stop orders on a live account, so this stop-loss "
+                                    "could not sit at the broker. Use the demo account, or set "
+                                    "\"allow_stop_by_alert\": true in trader/config.json to accept a stop that "
+                                    "only trader-alerts watches")
+            else:
+                leg = {"ticker": ticker, "quantity": _num(-q), "stopPrice": _num(stop), "timeValidity": "DAY"}
+                path = "/api/v0/equity/orders/stop"
+                if order.get("stop_loss_limit_price") is not None:
+                    leg = {"ticker": ticker, "quantity": _num(-q), "stopPrice": _num(stop),
+                           "limitPrice": _num(order["stop_loss_limit_price"]), "timeValidity": "DAY"}
+                    path = "/api/v0/equity/orders/stop_limit"
+                steps.append({"step": "stop-loss", "method": "POST", "path": path, "body": leg,
+                              "when": "after the entry fills: t212.py protect"})
+        if order.get("take_profit_limit_price") is not None:
+            notes.append("take-profit %s is not placed at Trading 212: its API has no bracket or one-cancels-"
+                         "other orders, and a sell limit would compete with the stop for the same shares. "
+                         "trader-alerts watches the target; you close with flatten and a new yes."
+                         % _p(order["take_profit_limit_price"]))
+    if typ == "market" and side == "buy":
+        notes.append("a market order sent while the market is closed waits at Trading 212 and fills at the "
+                     "next open")
+    return steps, problems, notes
+
+
 # ---------------------------------------------------------------- state
 
 def load_state(path):
@@ -323,7 +455,7 @@ def risk_verdict(risk, fp, today):
     return None, "this exact order was not in the last risk check (it changed or is new); run check.py again"
 
 
-def status_of(order, risk, state, today):
+def status_of(order, risk, state, today, cfg=None):
     """(ready, label, risk_result)"""
     fp = fingerprint(order)
     rv, why = risk_verdict(risk, fp, today)
@@ -335,8 +467,12 @@ def status_of(order, risk, state, today):
     if rec:
         st = rec.get("status")
         if st == "approved":
-            return False, "APPROVED by you at %s, waiting for the place_stock_order call" % rec.get("at"), rv
+            return False, "APPROVED by you at %s, waiting for t212.py place" % rec.get("at"), rv
         return False, "DONE: %s at %s" % (st, rec.get("at")), rv
+    if cfg is not None and broker_of(cfg) == "trading212":
+        problems = t212_plan(order, cfg)[1]
+        if problems:
+            return False, "NOT READY for Trading 212: " + "; ".join(problems), rv
     return True, "READY: trader-risk PASS, waiting for your yes", rv
 
 
@@ -349,12 +485,19 @@ def kind_of(order, rv):
 
 # ---------------------------------------------------------------- rendering
 
+def account_label(cfg):
+    if broker_of(cfg) == "ibkr":
+        return ("PAPER account" if cfg.get("paper", True) else "LIVE ACCOUNT, REAL MONEY"), "Interactive Brokers"
+    if t212_env(cfg) == "demo":
+        return "DEMO account (practice money)", "Trading 212"
+    return "LIVE ACCOUNT, REAL MONEY", "Trading 212"
+
+
 def render(order, idx, total, cfg, risk, state, today):
-    ready, label, rv = status_of(order, risk, state, today)
-    broker = str(cfg.get("broker", "alpaca")).lower()
-    paper = cfg.get("paper", True)
-    acct = "PAPER account" if paper else "LIVE ACCOUNT, REAL MONEY"
-    lines = ["ORDER %d of %d, %s, %s" % (idx, total, acct, "Interactive Brokers" if broker == "ibkr" else "Alpaca")]
+    ready, label, rv = status_of(order, risk, state, today, cfg)
+    broker = broker_of(cfg)
+    acct, name = account_label(cfg)
+    lines = ["ORDER %d of %d, %s, %s" % (idx, total, acct, name)]
     for part in plain_parts(order):
         lines.append("  " + part)
     if order.get("why"):
@@ -366,12 +509,18 @@ def render(order, idx, total, cfg, risk, state, today):
         lines.append("  Claude drafts this with the Interactive Brokers connector. IBKR sends it to your")
         lines.append("  IBKR account, and it only goes to the market after you approve it there.")
     else:
-        lines.append("  Claude will call place_stock_order with exactly:")
-        for l in json.dumps(tool_input(order), indent=2).splitlines():
-            lines.append("    " + l)
-        if is_bracket(order):
-            lines.append("  Alpaca places the entry, then the stop-loss and the take-profit as two orders")
-            lines.append("  that cancel each other: when one fills, the other is canceled.")
+        steps, problems, notes = t212_plan(order, cfg)
+        host = T212_HOSTS[t212_env(cfg)]
+        for st in steps:
+            if st["step"] == "stop-loss":
+                lines.append("  then, once the entry fills, t212.py protect --index %d sends the stop-loss:" % idx)
+            else:
+                lines.append("  Claude will run t212.py place --index %d, which sends exactly this to %s:"
+                             % (idx, host))
+            lines.append("    %s %s" % (st["method"], st["path"]))
+            lines.append("    " + json.dumps(st["body"]))
+        for n in notes:
+            lines.append("  note: " + n)
     if ready:
         lines.append("  Reply \"yes\" to place this one order, or \"no\" to skip it.")
         if broker != "ibkr":
@@ -380,13 +529,16 @@ def render(order, idx, total, cfg, risk, state, today):
 
 
 def ticket_json(order, idx, cfg, risk, state, today):
-    ready, label, rv = status_of(order, risk, state, today)
+    ready, label, rv = status_of(order, risk, state, today, cfg)
     loss, stop = max_loss(order)
-    return {"index": idx, "ready": ready, "status": label, "plain": plain(order),
-            "fingerprint": fingerprint(order), "paper": bool(cfg.get("paper", True)),
-            "broker": cfg.get("broker", "alpaca"), "tool": "place_stock_order",
-            "tool_input": tool_input(order), "why": order.get("why", ""),
-            "bracket": is_bracket(order), "max_loss": loss, "stop": stop}
+    out = {"index": idx, "ready": ready, "status": label, "plain": plain(order),
+           "fingerprint": fingerprint(order), "paper": bool(cfg.get("paper", True)),
+           "broker": broker_of(cfg), "order": tool_input(order), "why": order.get("why", ""),
+           "bracket": is_bracket(order), "max_loss": loss, "stop": stop}
+    if out["broker"] == "trading212":
+        steps, problems, notes = t212_plan(order, cfg)
+        out.update({"environment": t212_env(cfg), "requests": steps, "problems": problems, "notes": notes})
+    return out
 
 
 # ---------------------------------------------------------------- fills -> portfolio
@@ -500,7 +652,7 @@ def cmd_show(a):
 def cmd_approve(a):
     orders, cfg, risk, state, today, now = _load(a)
     order = _pick(orders, a.index)
-    ready, label, rv = status_of(order, risk, state, today)
+    ready, label, rv = status_of(order, risk, state, today, cfg)
     if not ready:
         raise TicketError("order %d is not ready: %s" % (a.index, label))
     ok, why = parse_yes(a.reply, order, [o.get("symbol", "") for o in orders])
@@ -512,17 +664,20 @@ def cmd_approve(a):
            "symbol": str(order.get("symbol", "")).upper(), "side": order.get("side"),
            "qty": order.get("qty"), "kind": kind_of(order, rv), "max_loss": loss, "stop": stop,
            "plain": plain(order), "status": "approved", "reply": a.reply,
-           "paper": bool(cfg.get("paper", True)), "broker": cfg.get("broker", "alpaca")}
+           "paper": bool(cfg.get("paper", True)), "broker": broker_of(cfg)}
     state.setdefault("orders", []).append(rec)
     write_json(a.state, state)
     print("Recorded your yes for order %d: %s." % (a.index, plain(order)))
-    if str(cfg.get("broker", "alpaca")).lower() == "ibkr":
+    if broker_of(cfg) == "ibkr":
         print("Now draft it with the Interactive Brokers connector; approve it in your IBKR account.")
     else:
-        print("Now call place_stock_order with exactly:")
-        print(json.dumps(tool_input(order), indent=2))
-        print("Claude's card shows Allow once / Deny. Then: ticket.py result --index %d --status "
-              "placed|denied|failed" % a.index)
+        steps = t212_plan(order, cfg)[0]
+        print("Now run: python3 t212.py place --index %d (it sends this to %s):"
+              % (a.index, T212_HOSTS[t212_env(cfg)]))
+        print("%s %s" % (steps[0]["method"], steps[0]["path"]))
+        print(json.dumps(steps[0]["body"], indent=2))
+        print("Claude's card shows Allow once / Deny for that command. If you deny it: ticket.py result "
+              "--index %d --status denied" % a.index)
     return 0
 
 
@@ -587,7 +742,7 @@ def cmd_flatten(a):
     cfg = read_json(a.config, "config", required=False) or {}
     sym = a.symbol.strip().upper()
     now, today = _clock(a)
-    source = "the broker, get_open_position"
+    source = "the broker, t212.py positions"
     if a.qty is not None:
         qty = _f(a.qty)
         if qty is None or qty <= 0:
@@ -598,8 +753,8 @@ def cmd_flatten(a):
                   if str(p.get("ticker") or p.get("symbol") or "").upper() == sym)
         source = a.portfolio
         if qty <= 1e-9:
-            raise TicketError("nothing to flatten: no %s shares in %s. Check the broker (get_open_position "
-                              "%s) and pass --qty if you do hold some" % (sym, a.portfolio, sym))
+            raise TicketError("nothing to flatten: no %s shares in %s. Check the broker (t212.py positions "
+                              "--symbol %s) and pass --qty if you do hold some" % (sym, a.portfolio, sym))
     plan = read_json(a.plan, "plan", required=False) or {}
     flat_by = (plan.get("flat_by") if str(plan.get("symbol", "")).upper() == sym else None) \
         or cfg.get("flat_by") or "15:55"
@@ -617,14 +772,14 @@ def cmd_flatten(a):
     print("Wrote it to %s%s." % (a.orders, (" (it replaced %d earlier proposal%s)"
                                              % (replaced, "" if replaced == 1 else "s")) if replaced else ""))
     if a.qty is None:
-        print("The qty comes from %s. Check it against get_open_position %s before you say yes." % (source, sym))
+        print("The qty comes from %s. Check it against t212.py positions --symbol %s before you say yes."
+              % (source, sym))
     print("Next:")
     print("  1. trader-risk: check.py. A sell that only closes what you hold is never blocked by the daily")
     print("     limits or the entry window.")
     print("  2. ticket.py show, then the user's yes for this one order.")
-    print("  3. If the bracket's stop-loss and take-profit are still open, Alpaca holds these shares for them")
-    print("     and rejects a new sell. Cancel them first: get_orders (status open, nested true), then")
-    print("     cancel_order_by_id for each open leg (Needs approval). Then place_stock_order with the ticket.")
+    print("  3. If the stop-loss order is still pending at Trading 212, it is selling the same shares. Cancel it")
+    print("     first: t212.py orders shows it, then t212.py cancel --id ID (Allow once). Then t212.py place.")
     return 0
 
 
@@ -694,7 +849,7 @@ def main(argv=None):
     p.add_argument("--state", default="trader/state/broker.json")
     p = sub.add_parser("flatten", help="a sell ticket that closes a symbol's position by flat_by")
     p.add_argument("--symbol", required=True)
-    p.add_argument("--qty", help="shares you hold, from get_open_position (default: trader/portfolio.json)")
+    p.add_argument("--qty", help="shares you hold, from t212.py positions (default: trader/portfolio.json)")
     p.add_argument("--orders", default="trader/orders.json", help="where the ticket is written")
     p.add_argument("--portfolio", default="trader/portfolio.json")
     p.add_argument("--plan", default="trader/plan.json")

@@ -68,7 +68,7 @@ class ExplicitYes(unittest.TestCase):
 
 
 class TicketShape(unittest.TestCase):
-    def test_tool_input_is_the_alpaca_call(self):
+    def test_tool_input_is_the_order_without_our_notes(self):
         o = dict(AAPL, why="from a list")
         self.assertEqual(ticket.tool_input(o), AAPL)
         self.assertEqual(ticket.tool_input({"symbol": "KO", "side": "buy", "qty": 3, "type": "limit",
@@ -93,14 +93,68 @@ class TicketShape(unittest.TestCase):
         self.assertEqual(ticket.max_loss(no_plan), (None, 358.32))
 
 
-class DesktopConfig(unittest.TestCase):
-    def test_example_is_paper_with_placeholder_keys(self):
-        with open(os.path.join(ROOT, "trader-broker", "claude_desktop_config.example.json")) as fh:
-            server = json.load(fh)["mcpServers"]["alpaca"]
-        self.assertEqual((server["command"], server["args"]), ("uvx", ["alpaca-mcp-server"]))
-        self.assertEqual(server["env"]["ALPACA_PAPER_TRADE"], "true")
-        for k in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY"):
-            self.assertIn("NEVER_IN_CHAT", server["env"][k])
+class SettingsExample(unittest.TestCase):
+    def test_every_sending_command_is_on_ask_and_nothing_is_allowed(self):
+        with open(os.path.join(ROOT, "trader-broker", "claude_settings.example.json")) as fh:
+            perms = json.load(fh)["permissions"]
+        self.assertNotIn("allow", perms)
+        for cmd in ("place", "protect", "cancel"):
+            self.assertIn("Bash(python3 *t212.py %s*)" % cmd, perms["ask"])
+
+    def test_no_key_in_the_example_config(self):
+        with open(CFG_PATH) as fh:
+            text = fh.read().lower()
+        self.assertNotIn("api_key", text)
+        self.assertNotIn("secret", text)
+        self.assertIn('"broker": "trading212"', text)
+
+
+class Trading212Request(unittest.TestCase):
+    DEMO = {"broker": "trading212", "paper": True}
+    LIVE = {"broker": "trading212", "paper": False}
+
+    def test_the_bracket_on_demo_is_a_market_buy_then_a_stop_sell(self):
+        steps, problems, notes = ticket.t212_plan(tsla(), self.DEMO)
+        self.assertEqual(problems, [])
+        self.assertEqual([s["step"] for s in steps], ["entry", "stop-loss"])
+        self.assertEqual((steps[0]["path"], steps[0]["body"]),
+                         ("/api/v0/equity/orders/market", {"ticker": "TSLA_US_EQ", "quantity": 8, "extendedHours": False}))
+        self.assertEqual((steps[1]["path"], steps[1]["body"]),
+                         ("/api/v0/equity/orders/stop",
+                          {"ticker": "TSLA_US_EQ", "quantity": -8, "stopPrice": 358.32, "timeValidity": "DAY"}))
+        self.assertIn("take-profit 370.04 is not placed at Trading 212", " ".join(notes))
+
+    def test_live_takes_market_orders_only_and_no_broker_stop(self):
+        _, problems, _ = ticket.t212_plan(tsla(), self.LIVE)
+        self.assertIn("no stop orders on a live account", " ".join(problems))
+        steps, problems, notes = ticket.t212_plan(tsla(), dict(self.LIVE, allow_stop_by_alert=True))
+        self.assertEqual((problems, [s["step"] for s in steps]), ([], ["entry"]))
+        self.assertIn("NOT at the broker", " ".join(notes))
+        lim = {"symbol": "KO", "side": "buy", "qty": "3", "type": "limit", "limit_price": "89.5", "time_in_force": "day"}
+        self.assertIn("only market orders on a live account", " ".join(ticket.t212_plan(lim, self.LIVE)[1]))
+        steps, problems, _ = ticket.t212_plan(lim, self.DEMO)
+        self.assertEqual(problems, [])
+        self.assertEqual(steps[0]["body"], {"ticker": "KO_US_EQ", "quantity": 3, "limitPrice": 89.5,
+                                            "timeValidity": "DAY"})
+
+    def test_what_trading_212_cannot_take(self):
+        self.assertIn("not by amount", " ".join(ticket.t212_plan(AAPL, self.DEMO)[1]))
+        trail = {"symbol": "KO", "side": "sell", "qty": "3", "type": "trailing_stop", "trail_percent": "2",
+                 "time_in_force": "day"}
+        self.assertIn("no trailing stop order", " ".join(ticket.t212_plan(trail, self.DEMO)[1]))
+        opg = {"symbol": "KO", "side": "buy", "qty": "3", "type": "limit", "limit_price": "89", "time_in_force": "opg"}
+        self.assertIn("day or gtc", " ".join(ticket.t212_plan(opg, self.DEMO)[1]))
+
+    def test_sell_is_a_negative_quantity_and_tickers_map(self):
+        sell = {"symbol": "TSLA", "side": "sell", "qty": "8", "type": "market", "time_in_force": "day"}
+        self.assertEqual(ticket.t212_plan(sell, self.DEMO)[0][0]["body"]["quantity"], -8)
+        self.assertEqual(ticket.t212_ticker("brk.b"), "BRK_B_US_EQ")
+        self.assertEqual(ticket.t212_ticker("XYZ", {"t212_tickers": {"XYZ": "XYZl_EQ"}}), "XYZl_EQ")
+
+    def test_an_unknown_broker_is_refused(self):
+        with self.assertRaises(ticket.TicketError):
+            ticket.broker_of({"broker": "alpaca"})
+        self.assertEqual(ticket.broker_of({}), "trading212")
 
 
 class Flow(unittest.TestCase):
@@ -144,12 +198,14 @@ class Flow(unittest.TestCase):
         self.assertEqual(self.run_risk(), 0)
         code, text, _ = run(self.args("show", "--index", "1"))
         self.assertEqual(code, 0)
-        self.assertIn("ORDER 1 of 1, PAPER account, Alpaca", text)
+        self.assertIn("ORDER 1 of 1, DEMO account (practice money), Trading 212", text)
         for part in TSLA_PLAIN.split(" / "):
             self.assertIn("  " + part + "\n", text)
         self.assertIn("READY: trader-risk PASS", text)
-        self.assertIn('"order_class": "bracket"', text)
-        self.assertIn('"stop_loss_stop_price": "358.32"', text)
+        self.assertIn("sends exactly this to demo.trading212.com", text)
+        self.assertIn('POST /api/v0/equity/orders/market\n    {"ticker": "TSLA_US_EQ", "quantity": 8, '
+                      '"extendedHours": false}', text)
+        self.assertIn('"quantity": -8, "stopPrice": 358.32', text)
         self.assertNotIn('"plan"', text)
         self.assertNotIn('"why"', text)
         self.assertIn("Allow once", text)
@@ -161,8 +217,9 @@ class Flow(unittest.TestCase):
 
         code, text, _ = run(self.args("approve", "--index", "1", "--reply", "yes"))
         self.assertEqual(code, 0)
-        self.assertIn("place_stock_order", text)
-        self.assertEqual(json.loads(text[text.index("{"):text.rindex("}") + 1]), TSLA_CALL)
+        self.assertIn("t212.py place --index 1", text)
+        self.assertEqual(json.loads(text[text.index("{"):text.rindex("}") + 1]),
+                         {"ticker": "TSLA_US_EQ", "quantity": 8, "extendedHours": False})
         code, _, err = run(self.args("approve", "--index", "1", "--reply", "yes"))
         self.assertEqual(code, 1)
         self.assertIn("APPROVED", err)
@@ -204,7 +261,7 @@ class Flow(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("SELL 8 shares of TSLA, market order, good for today (flat by 15:55 New York)", text)
         self.assertIn("replaced 1 earlier proposal", text)
-        self.assertIn("cancel_order_by_id", text)
+        self.assertIn("t212.py cancel --id", text)
         with open(self.orders) as fh:
             doc = json.load(fh)
         self.assertEqual(ticket.tool_input(doc["orders"][0]),
@@ -232,7 +289,7 @@ class Flow(unittest.TestCase):
         code, text, _ = run(["flatten", "--symbol", "tsla", "--qty", "8", "--orders", self.orders,
                              "--portfolio", self.none, "--plan", self.none, "--config", self.cfg, "--now", NOW])
         self.assertEqual(code, 0)
-        self.assertNotIn("Check it against get_open_position", text)
+        self.assertNotIn("Check it against t212.py positions", text)
         self.assertEqual(run(["flatten", "--symbol", "TSLA", "--qty", "0", "--orders", self.orders])[0], 1)
 
     def test_an_edited_order_is_not_ready(self):
@@ -278,7 +335,7 @@ class Flow(unittest.TestCase):
         code, text, _ = run(self.args("show", "--index", "1"))
         self.assertIn("Interactive Brokers", text)
         self.assertIn("after you approve it there", text)
-        self.assertNotIn("place_stock_order", text)
+        self.assertNotIn("t212.py", text)
 
     def test_fill_sell_relieves_the_oldest_lot(self):
         pf = {"cash": 0, "positions": [{"ticker": "KO", "shares": 3, "lots": [

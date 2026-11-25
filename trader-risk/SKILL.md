@@ -61,7 +61,7 @@ batch that is fine order by order but breaks a limit together is caught.
 
 | check | blocks when |
 | --- | --- |
-| format | no symbol, side not buy or sell, both or neither of qty and notional, a notional order that is not market + day (Alpaca's rule), a limit order with no limit price; a bracket that is not whole shares, not `day` or `gtc`, or misses its stop-loss or take-profit |
+| format | no symbol, side not buy or sell, both or neither of qty and notional, a notional order that is not market + day (trader-broker also refuses notional orders: Trading 212 takes shares only), a limit order with no limit price; a bracket that is not whole shares, not `day` or `gtc`, or misses its stop-loss or take-profit |
 | asset | an option symbol while `allow_options` is false; crypto or anything that is not a US stock or ETF ticker |
 | short | a sell of more than you hold (`allow_short` false) |
 | blocked | (entries) the ticker is on the `blocked` list |
@@ -163,10 +163,10 @@ treats a PASS as the user's yes.
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
+- Demo (practice money) trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
 - Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
   passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
+  user clicked Allow once on Claude's own card because the order command is on "ask"
+  (`.claude/settings.json` permissions). Never put an order command in "allow".
 - No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+- Broker keys live in environment variables on the user's own computer, never in the chat.
